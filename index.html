@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PPO Walker Demo</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/matter-js@0.19.0/build/matter.min.js"></script>
+<script src="ppo.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: 'Consolas', 'Courier New', monospace;
+  padding: 20px;
+  min-height: 100vh;
+}
+
+h1 {
+  text-align: center;
+  color: #58a6ff;
+  font-size: 22px;
+  margin-bottom: 16px;
+  letter-spacing: 1px;
+}
+
+/* ─── Controls ─── */
+.controls {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+button {
+  padding: 7px 18px;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background: #21262d;
+  color: #c9d1d9;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  transition: background 0.15s;
+}
+button:hover { background: #30363d; }
+button.primary { background: #1f6feb; border-color: #388bfd; color: #fff; }
+button.primary:hover { background: #388bfd; }
+
+.speed-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #8b949e;
+  font-size: 12px;
+}
+input[type="range"] { width: 90px; accent-color: #58a6ff; cursor: pointer; }
+
+/* ─── Layout ─── */
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  max-width: 1080px;
+  margin: 0 auto;
+}
+
+.panel {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.panel-title {
+  color: #58a6ff;
+  font-size: 11px;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  margin-bottom: 10px;
+}
+
+canvas { display: block; width: 100%; border-radius: 6px;}
+
+#envCanvas {
+  background: #0d1117;
+  border: 1px solid #21262d;
+}
+
+/* ─── Stats grid ─── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.stat-box {
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  padding: 9px 10px;
+}
+.stat-label {
+  color: #8b949e;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.stat-value {
+  color: #f0f6fc;
+  font-size: 18px;
+  font-weight: bold;
+  margin-top: 3px;
+}
+.blue   { color: #58a6ff; }
+.green  { color: #3fb950; }
+.yellow { color: #d29922; }
+
+#status {
+  text-align: center;
+  margin-top: 10px;
+  font-size: 12px;
+  color: #8b949e;
+}
+</style>
+</head>
+<body>
+
+<h1>PPO · 爬行機器人訓練</h1>
+
+<div class="controls">
+  <button id="btnStart" class="primary" onclick="startTraining()">▶ 開始訓練</button>
+  <button id="btnRandom" onclick="startRandomTest()">🎲 隨機亂動測試</button>
+  <button id="btnStop"  style="display:none"  onclick="stopTraining()">⏸ 暫停</button>
+  <button onclick="resetTraining()">↺ 重置</button>
+  <div class="speed-ctrl">
+    <span>速度</span>
+    <input type="range" id="speedSlider" min="1" max="2000" value="200"
+           oninput="stepsPerFrame=+this.value;document.getElementById('speedVal').textContent=this.value">
+    <span id="speedVal">200</span><span> steps/yield</span>
+  </div>
+</div>
+
+<div class="layout">
+  <!-- Left column -->
+  <div>
+    <div class="panel">
+      <div class="panel-title">物理環境 (Matter.js)</div>
+      <canvas id="envCanvas" width="490" height="210"></canvas>
+      <div class="stats-grid">
+        <div class="stat-box">
+          <div class="stat-label">Episode</div>
+          <div class="stat-value blue" id="sEpisode">0</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">PPO 更新</div>
+          <div class="stat-value" id="sUpdate">0</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">最高位移</div>
+          <div class="stat-value green" id="sBestDist">0</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Steps/sec</div>
+          <div class="stat-value yellow" id="sSps">0</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">σ (探索)</div>
+          <div class="stat-value" id="sSigma">1.00</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right column -->
+  <div style="display:flex;flex-direction:column;gap:14px;">
+    <div class="panel">
+      <div class="panel-title">Episode 獎勵 (距離)</div>
+      <canvas id="rewardChart" width="490" height="200"></canvas>
+    </div>
+    <div class="panel">
+      <div class="panel-title">說明與控制分析</div>
+      <p style="font-size:12px; line-height: 1.5; color: #8b949e;">
+        使用 <b>連續動作 Gaussian Policy</b> 驅動 1 個關節。網路輸出 μ（平均施力），學習 log σ（探索幅度）；動作採樣自 <i>a ~ N(μ, σ²)</i>，clip 後乘以 torqueMax 施加在腿關節。<br><br>
+        1. <b>σ 的作用：</b>訓練初期 σ 大（初始 = 1），大量探索不同力量；獎勵改善後 σ 自動縮小，逐漸收斂到精確控制。不需要手動猜測力矩大小。<br><br>
+        2. <b>結構：</b>棒子1（Body，藍色，水平）與棒子2（Leg，綠色，垂直）由 1 個關節相連。Body 碰地即 episode 結束，只有 Leg 可以踩地。<br>
+        3. <b>狀態空間 (7維)：</b>Body 角度與角速度、Leg 角度與角速度、Body 的 x/y 速度、Body 高度。
+      </p>
+    </div>
+  </div>
+</div>
+
+<div id="status">等待開始...</div>
+
+<script>
+// =============================================================
+//  CONFIG
+// =============================================================
+// Use WebGL backend for GPU-accelerated NN ops
+tf.setBackend('webgl').then(() => console.log('Backend:', tf.getBackend()));
+const CFG = {
+  stateDim:        7,   // 身體角度, 角速度; 腿角度, 角速度; x速度, y速度, y高度
+  hiddenSize:      128,
+  lr:              3e-4,
+  gamma:           0.99,
+  lam:             0.95,
+  clipEps:         0.2,
+  entropyCoef:     0.005,
+  numEpochs:       10,
+  batchSize:       64,
+  rolloutSteps:    512,
+  maxEpSteps:      500,
+  torqueMax:       0.08,  // 關節最大扭矩 (N·m 比例)
+  numEnvs:         4,     // 並行環境數量
+};
+
+let agent = new PPOAgent(CFG);
+
+// =============================================================
+//  MATTER.JS ENVIRONMENT
+// =============================================================
+const Engine = Matter.Engine,
+      Render = Matter.Render,
+      Runner = Matter.Runner,
+      Bodies = Matter.Bodies,
+      Body   = Matter.Body,
+      Composite = Matter.Composite,
+      Constraint = Matter.Constraint,
+      Events = Matter.Events;
+
+class WalkerEnv {
+  constructor(canvas) {
+    this.engine = Engine.create();
+    this.world = this.engine.world;
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    
+    // Disable default gravity integration over UI frame rate to step manually
+    this.engine.timing.timeScale = 1;
+    this.engine.gravity.y = 1;
+
+    this.createWorld();
+  }
+
+  createWorld() {
+    Composite.clear(this.world);
+    Engine.clear(this.engine);
+
+    // Ground
+    this.ground = Bodies.rectangle(2000, 200, 8000, 50, { 
+      isStatic: true, 
+      friction: 1.0, 
+      collisionFilter: { category: 2 } 
+    });
+
+    const startX = 100;
+    const startY = 100;
+
+    // Rod 1: body (horizontal)
+    this.body = Bodies.rectangle(startX, startY, 80, 12, { 
+      collisionFilter: { group: -1, mask: 2 }, friction: 0.8
+    });
+    // Rod 2: leg (vertical), top aligns with right end of body
+    this.leg = Bodies.rectangle(startX + 40, startY + 30, 12, 60, { 
+      collisionFilter: { group: -1, mask: 2 }, friction: 1.0
+    });
+
+    this.body.label = "body";
+    this.leg.label = "leg";
+
+    // Single joint: right end of body → top of leg
+    this.joint1 = Constraint.create({
+      bodyA: this.body,
+      pointA: { x: 40, y: 0 },
+      bodyB: this.leg,
+      pointB: { x: 0, y: -30 },
+      stiffness: 1,
+      length: 0
+    });
+
+    Composite.add(this.world, [this.ground, this.body, this.leg, this.joint1]);
+    this.startPositionX = this.body.position.x;
+    this.lastX = this.startPositionX;
+  }
+
+  reset() {
+    this.createWorld();
+    this.steps = 0;
+    return this.getState();
+  }
+
+  getState() {
+    return [
+      this.body.angle % (2*Math.PI),
+      this.body.angularVelocity,
+      this.leg.angle % (2*Math.PI),
+      this.leg.angularVelocity,
+      this.body.velocity.x,
+      this.body.velocity.y,
+      this.body.position.y
+    ];
+  }
+
+  step(action) {
+    // Continuous Gaussian action: clip to [-1, 1] then scale by torqueMax
+    // Network outputs unbounded μ; σ explores automatically
+    const clipped = Math.max(-1, Math.min(1, action));
+    this.leg.torque = clipped * CFG.torqueMax;
+
+    // Step Physics
+    Matter.Engine.update(this.engine, 1000 / 60);
+    this.steps++;
+
+    // Check failure: body (rod1) must not touch the ground
+    let done = false;
+    let fail = false;
+    if (this.body.bounds.max.y >= 175) {
+      fail = true;
+      done = true;
+    }
+
+    // Distance traveled
+    const dist = this.body.position.x - this.startPositionX;
+
+    // Reward: forward progress
+    let reward = (this.body.position.x - this.lastX);
+    this.lastX = this.body.position.x;
+
+    if (fail) reward -= 10;
+
+    return { state: this.getState(), reward, done, dist };
+  }
+
+  render() {
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    this.ctx.clearRect(0, 0, w, h);
+    
+    // Camera follow
+    var cx = this.body.position.x - w/4;
+    
+    this.ctx.save();
+    this.ctx.translate(-cx, 0);
+
+    // Ground ruler
+    this.ctx.fillStyle = '#30363d';
+    this.ctx.fillRect(cx, 175, w, 50);
+    
+    this.ctx.fillStyle = '#8b949e';
+    this.ctx.font = '10px monospace';
+    // Draw ruler ticks
+    for(let i=Math.floor(cx/50)*50; i<cx+w; i+=50) {
+      this.ctx.fillRect(i, 175, 2, 5);
+      this.ctx.fillText(`${i}px`, i-10, 195);
+    }
+
+    // Colors
+    const drawBody = (body, color) => {
+      this.ctx.beginPath();
+      const vertices = body.vertices;
+      this.ctx.moveTo(vertices[0].x, vertices[0].y);
+      for (let j = 1; j < vertices.length; j++) {
+        this.ctx.lineTo(vertices[j].x, vertices[j].y);
+      }
+      this.ctx.lineTo(vertices[0].x, vertices[0].y);
+      this.ctx.fillStyle = color;
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#fff';
+      this.ctx.stroke();
+    };
+
+    drawBody(this.body, '#1f6feb'); // Blue (Body / Rod 1)
+    drawBody(this.leg,  '#3fb950'); // Green (Leg / Rod 2)
+
+    this.ctx.restore();
+  }
+
+  // Render a scaled-down version into a region of a shared canvas context
+  renderMini(targetCtx, cellX, cellY, cellW, cellH) {
+    const srcW = 490, srcH = 210;
+    const sx = cellW / srcW, sy = cellH / srcH;
+
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.rect(cellX, cellY, cellW, cellH);
+    targetCtx.clip();
+
+    // Background
+    targetCtx.fillStyle = '#0d1117';
+    targetCtx.fillRect(cellX, cellY, cellW, cellH);
+
+    targetCtx.translate(cellX, cellY);
+    targetCtx.scale(sx, sy);
+
+    // Camera follow
+    const camX = this.body.position.x - srcW / 4;
+    targetCtx.translate(-camX, 0);
+
+    // Ground
+    targetCtx.fillStyle = '#30363d';
+    targetCtx.fillRect(camX, 175, srcW + Math.abs(camX), 35);
+
+    const drawB = (body, color) => {
+      targetCtx.beginPath();
+      body.vertices.forEach((v, i) =>
+        i === 0 ? targetCtx.moveTo(v.x, v.y) : targetCtx.lineTo(v.x, v.y)
+      );
+      targetCtx.closePath();
+      targetCtx.fillStyle = color;
+      targetCtx.fill();
+      targetCtx.strokeStyle = 'rgba(255,255,255,0.6)';
+      targetCtx.lineWidth = 2 / Math.min(sx, sy);
+      targetCtx.stroke();
+    };
+    drawB(this.body, '#1f6feb');
+    drawB(this.leg,  '#3fb950');
+
+    targetCtx.restore();
+  }
+}
+
+// =============================================================
+//  TRAINING LOOP
+// =============================================================
+const sharedCanvas = document.getElementById('envCanvas');
+const sharedCtx    = sharedCanvas.getContext('2d');
+
+// N parallel environments — each independent, same shared neural network
+let envs          = [];
+let currentStates = [];
+let epStepCounts  = [];
+
+let isRunning    = false;
+let isRandomTest = false;
+let stepsPerFrame = 200;   // transitions per yield (total across all envs)
+let animFrame    = null;
+
+// Per-env rollout buffers (correct multi-env GAE: each env gets its own buffer)
+let perEnvBuf = [];
+function mkEnvBuf() { return { states: [], actions: [], rewards: [], values: [], logProbs: [], dones: [] }; }
+function clearPerEnvBuf() { perEnvBuf = Array.from({ length: CFG.numEnvs }, mkEnvBuf); }
+
+let totalEpisodes = 0;
+let totalUpdates  = 0;
+let rewardHistory = [];
+let bestDist = 0;
+
+// Steps/sec tracking
+let spsCounter = 0;
+let spsLastTime = performance.now();
+let spsDisplay = 0;
+
+// ─── Physics loop: full-speed via setTimeout, batch inference across all envs ──
+async function physicsLoop() {
+  while (isRunning) {
+    const batchIter = Math.max(1, Math.ceil(stepsPerFrame / CFG.numEnvs));
+
+    for (let step = 0; step < batchIter; step++) {
+      let actions, logProbs, values;
+      if (isRandomTest) {
+        // Pure random testing mode: bypass Neural Network
+        actions = Array.from({ length: CFG.numEnvs }, () => Math.random() * 2 - 1); // [-1, 1]
+      } else {
+        // ONE GPU forward pass for all N envs simultaneously
+        const infer = agent.selectActionBatch(currentStates);
+        actions = infer.actions;
+        logProbs = infer.logProbs;
+        values = infer.values;
+      }
+
+      for (let e = 0; e < CFG.numEnvs; e++) {
+        const result = envs[e].step(actions[e]);
+
+        if (!isRandomTest) {
+          perEnvBuf[e].states.push([...currentStates[e]]);
+          perEnvBuf[e].actions.push(actions[e]);
+          perEnvBuf[e].rewards.push(result.reward);
+          perEnvBuf[e].values.push(values[e]);
+          perEnvBuf[e].logProbs.push(logProbs[e]);
+          perEnvBuf[e].dones.push(result.done);
+        }
+
+        epStepCounts[e]++;
+        spsCounter++;
+
+        if (result.done || epStepCounts[e] >= CFG.maxEpSteps) {
+          if (result.dist > bestDist) bestDist = Math.floor(result.dist);
+          rewardHistory.push(result.dist);
+          totalEpisodes++;
+          epStepCounts[e] = 0;
+          currentStates[e] = envs[e].reset();
+        } else {
+          currentStates[e] = [...result.state];
+        }
+      }
+    }
+
+    // SPS counter
+    const now = performance.now();
+    if (now - spsLastTime >= 1000) {
+      spsDisplay = Math.round(spsCounter * 1000 / (now - spsLastTime));
+      spsCounter = 0;
+      spsLastTime = now;
+    }
+
+    // PPO update: trigger when total transitions ≥ rolloutSteps
+    if (!isRandomTest) {
+      const totalTrans = perEnvBuf.reduce((s, b) => s + b.states.length, 0);
+      if (totalTrans >= CFG.rolloutSteps) {
+        setStatus('🔄 執行 PPO 更新...');
+
+        // Correct multi-env GAE: compute per env separately, then flatten and pool
+        const lastVals = agent.getValueBatch(currentStates);
+        let allStates = [], allActions = [], allLogProbs = [], allAdvantages = [], allReturns = [];
+        for (let e = 0; e < CFG.numEnvs; e++) {
+          const b = perEnvBuf[e];
+          const { advantages, returns } = agent.computeGAE(b.rewards, b.values, b.dones, lastVals[e]);
+          allStates.push(...b.states);
+          allActions.push(...b.actions);
+          allLogProbs.push(...b.logProbs);
+          allAdvantages.push(...advantages);
+          allReturns.push(...returns);
+        }
+
+        await agent.update(allStates, allActions, allLogProbs, allAdvantages, allReturns);
+        totalUpdates++;
+        clearPerEnvBuf();
+        renderRewardChart();
+        setStatus('📊 訓練運行中...');
+      }
+    }
+
+    await new Promise(r => setTimeout(r, 0));
+  }
+}
+
+// ─── Render loop: 60fps grid of all N envs ───
+function renderLoop() {
+  if (!isRunning) return;
+
+  const cw = sharedCanvas.width, ch = sharedCanvas.height;
+  sharedCtx.clearRect(0, 0, cw, ch);
+
+  const cols  = Math.min(CFG.numEnvs, 2);
+  const rows  = Math.ceil(CFG.numEnvs / cols);
+  const cellW = Math.floor(cw / cols);
+  const cellH = Math.floor(ch / rows);
+
+  envs.forEach((e, i) => {
+    const col = i % cols, row = Math.floor(i / cols);
+    e.renderMini(sharedCtx, col * cellW, row * cellH, cellW, cellH);
+  });
+
+  // Grid dividers
+  sharedCtx.strokeStyle = '#30363d';
+  sharedCtx.lineWidth = 1;
+  for (let c = 1; c < cols; c++) {
+    sharedCtx.beginPath(); sharedCtx.moveTo(c * cellW, 0); sharedCtx.lineTo(c * cellW, ch); sharedCtx.stroke();
+  }
+  for (let r = 1; r < rows; r++) {
+    sharedCtx.beginPath(); sharedCtx.moveTo(0, r * cellH); sharedCtx.lineTo(cw, r * cellH); sharedCtx.stroke();
+  }
+
+  updateStatsUI();
+  animFrame = requestAnimationFrame(renderLoop);
+}
+
+// =============================================================
+//  UI CONTROL
+// =============================================================
+function initEnvs() {
+  envs = Array.from({ length: CFG.numEnvs }, () => new WalkerEnv(sharedCanvas));
+  currentStates = envs.map(e => e.reset());
+  epStepCounts  = Array(CFG.numEnvs).fill(0);
+  clearPerEnvBuf();
+}
+
+function startTraining() {
+  if (isRunning) return;
+  if (envs.length === 0) initEnvs();
+  isRunning = true;
+  isRandomTest = false;
+  spsCounter = 0;
+  spsLastTime = performance.now();
+  document.getElementById('btnStart').style.display = 'none';
+  document.getElementById('btnRandom').style.display = 'none';
+  document.getElementById('btnStop').style.display = '';
+  setStatus('📊 訓練運行中...');
+  physicsLoop();
+  animFrame = requestAnimationFrame(renderLoop);
+}
+
+function startRandomTest() {
+  if (isRunning) return;
+  if (envs.length === 0) initEnvs();
+  isRunning = true;
+  isRandomTest = true;
+  spsCounter = 0;
+  spsLastTime = performance.now();
+  document.getElementById('btnStart').style.display = 'none';
+  document.getElementById('btnRandom').style.display = 'none';
+  document.getElementById('btnStop').style.display = '';
+  setStatus('🎲 隨機亂動測試中... (不更新網路)');
+  physicsLoop();
+  animFrame = requestAnimationFrame(renderLoop);
+}
+
+function stopTraining() {
+  isRunning = false;
+  if (animFrame) cancelAnimationFrame(animFrame);
+  document.getElementById('btnStart').style.display = '';
+  document.getElementById('btnRandom').style.display = '';
+  document.getElementById('btnStop').style.display = 'none';
+  setStatus('⏸ 已暫停');
+}
+
+function resetTraining() {
+  stopTraining();
+  agent = new PPOAgent(CFG);
+  initEnvs();
+  totalEpisodes = 0;
+  totalUpdates  = 0;
+  rewardHistory = [];
+  bestDist = 0;
+  spsCounter = 0;
+  spsLastTime = performance.now();
+  spsDisplay = 0;
+  updateStatsUI();
+  renderRewardChart();
+  document.getElementById('btnStart').style.display = '';
+  setStatus('等待開始...');
+}
+
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+
+function updateStatsUI() {
+  document.getElementById('sEpisode').textContent = totalEpisodes;
+  document.getElementById('sUpdate').textContent = totalUpdates;
+  document.getElementById('sBestDist').textContent = bestDist + 'px';
+  document.getElementById('sSps').textContent = spsDisplay.toLocaleString();
+  if (agent && agent.logStd) {
+    const sigma = Math.exp(Math.max(-2, Math.min(2, agent.logStd.arraySync())));
+    document.getElementById('sSigma').textContent = sigma.toFixed(3);
+  }
+}
+
+const rewardCanvas = document.getElementById('rewardChart');
+const rewardCtx = rewardCanvas.getContext('2d');
+
+function renderRewardChart() {
+  const W = rewardCanvas.width, H = rewardCanvas.height;
+  const pad = { t: 28, r: 16, b: 28, l: 46 };
+  const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+
+  rewardCtx.clearRect(0, 0, W, H);
+  rewardCtx.fillStyle = '#0d1117';
+  rewardCtx.fillRect(0, 0, W, H);
+
+  const data = rewardHistory;
+  if (data.length === 0) return;
+
+  const maxVal = Math.max(...data, 100);
+  const xAt = i => pad.l + (i / Math.max(data.length - 1, 1)) * cW;
+  const yAt = v => pad.t + cH * (1 - v / maxVal);
+
+  rewardCtx.strokeStyle = '#58a6ff44';
+  rewardCtx.lineWidth = 1;
+  rewardCtx.beginPath();
+  data.forEach((v, i) => {
+    i === 0 ? rewardCtx.moveTo(xAt(i), yAt(v)) : rewardCtx.lineTo(xAt(i), yAt(v));
+  });
+  rewardCtx.stroke();
+}
+
+// Initial render placeholder
+sharedCtx.fillStyle = '#0d1117';
+sharedCtx.fillRect(0, 0, sharedCanvas.width, sharedCanvas.height);
+</script>
+</body>
+</html>
